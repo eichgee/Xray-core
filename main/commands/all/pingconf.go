@@ -21,7 +21,9 @@ var cmdPing = &base.Command{
 	UsageLine: `{{.Exec}} ping [-u https://www.google.com/] [-c "C:\conf.json"] [-t 10s]`,
 	Short:     `Ping config and exit`,
 	Long: `
-Ping config and exit.
+	-u for target url of ping
+	-c xray file config
+	-t for timeout
 `,
 }
 
@@ -49,6 +51,7 @@ func executePing(cmd *base.Command, args []string) {
 		output, err:= measureOutboundDelay(string(bytes), *pingUrl, *pingTimeout)
 		if err != nil{
 			fmt.Println(err)
+			return
 		}
 		fmt.Println(output)
 	}else{
