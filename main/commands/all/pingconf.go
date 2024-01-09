@@ -42,15 +42,9 @@ func executePing(cmd *base.Command, args []string) {
 
 	isValid := lenConfig > 0
 	if (isValid){
-		bytes, err := os.ReadFile(*pingConfig)
-		if err !=nil{
-			fmt.Println(err)
-			return
-		}
-
-		output, err:= measureOutboundDelay(string(bytes), *pingUrl, *pingTimeout)
+		output, err:= measureOutboundDelay(*pingConfig, *pingUrl, *pingTimeout)
 		if err != nil{
-			fmt.Println(err)
+			fmt.Printf("error: %v", err)
 			return
 		}
 		fmt.Println(output)
@@ -59,8 +53,13 @@ func executePing(cmd *base.Command, args []string) {
 	}
 }
 
-func measureOutboundDelay(ConfigureFileContent string, Url string, timeout string) (string, error) {
-	config, err := v2serial.LoadJSONConfig(strings.NewReader(ConfigureFileContent))
+func measureOutboundDelay(filePath string, Url string, timeout string) (string, error) {
+	bytes, err := os.ReadFile(filePath)
+		if err !=nil{
+			fmt.Println(err)
+			return "", err
+		}
+	config, err := v2serial.LoadJSONConfig(strings.NewReader(string(bytes)))
 	if err != nil {
 		return "", err
 	}
