@@ -17,5 +17,6 @@ func init() {
 		cmdUUID,
 		cmdX25519,
 		cmdWG,
+		cmdPing
 	)
 }
