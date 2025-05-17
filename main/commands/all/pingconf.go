@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/xtls/xray-core/common/cmdarg"
+	"github.com/xtls/xray-core/common/errors"
 	v2net "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/platform"
 	"github.com/xtls/xray-core/common/serial"
@@ -166,7 +167,7 @@ func measureOutboundDelay() (string, error) {
 
 	config, err := core.LoadConfig(getConfigFormat(), configFiles)
 	if err != nil {
-		return "", newError("failed to load config files: [", configFiles.String(), "]").Base(err)
+		return "", errors.New("failed to load config files: [", configFiles.String(), "]").Base(err)
 	}
 
 	log := &conf.LogConfig{LogLevel: "none"}
