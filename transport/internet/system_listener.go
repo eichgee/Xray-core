@@ -11,8 +11,8 @@ import (
 
 	"github.com/pires/go-proxyproto"
 	"github.com/sagernet/sing/common/control"
+	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/session"
 )
 
 var effectiveListener = DefaultListener{}
@@ -21,36 +21,57 @@ type DefaultListener struct {
 	controllers []control.Func
 }
 
-type combinedListener struct {
-	net.Listener
-	locker *FileLocker // for unix domain socket
-}
-
-func (cl *combinedListener) Close() error {
-	if cl.locker != nil {
-		cl.locker.Release()
-		cl.locker = nil
-	}
-	return cl.Listener.Close()
-}
-
 func getControlFunc(ctx context.Context, sockopt *SocketConfig, controllers []control.Func) func(network, address string, c syscall.RawConn) error {
 	return func(network, address string, c syscall.RawConn) error {
 		return c.Control(func(fd uintptr) {
 			for _, controller := range controllers {
 				if err := controller(network, address, c); err != nil {
-					newError("failed to apply external controller").Base(err).WriteToLog(session.ExportIDToError(ctx))
+					errors.LogInfoInner(ctx, err, "failed to apply external controller")
 				}
 			}
 
 			if sockopt != nil {
 				if err := applyInboundSocketOptions(network, fd, sockopt); err != nil {
-					newError("failed to apply socket options to incoming connection").Base(err).WriteToLog(session.ExportIDToError(ctx))
+					errors.LogInfoInner(ctx, err, "failed to apply socket options to incoming connection")
 				}
 			}
 
 			setReusePort(fd)
 		})
+	}
+}
+
+// For some reason, other component of ray will assume the listener is a TCP listener and have valid remote address.
+// But in fact it doesn't. So we need to wrap the listener to make it return 0.0.0.0(unspecified) as remote address.
+// If other issues encountered, we should able to fix it here.
+type UnixListenerWrapper struct {
+	*net.UnixListener
+	locker *FileLocker
+}
+
+func (l *UnixListenerWrapper) Accept() (net.Conn, error) {
+	conn, err := l.UnixListener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &UnixConnWrapper{UnixConn: conn.(*net.UnixConn)}, nil
+}
+
+func (l *UnixListenerWrapper) Close() error {
+	if l.locker != nil {
+		l.locker.Release()
+		l.locker = nil
+	}
+	return l.UnixListener.Close()
+}
+
+type UnixConnWrapper struct {
+	*net.UnixConn
+}
+
+func (conn *UnixConnWrapper) RemoteAddr() net.Addr {
+	return &net.TCPAddr{
+		IP: []byte{0, 0, 0, 0},
 	}
 }
 
@@ -95,7 +116,7 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 				address = s[0]
 				perm, perr := strconv.ParseUint(s[1], 8, 32)
 				if perr != nil {
-					return nil, newError("failed to parse permission: " + s[1]).Base(perr)
+					return nil, errors.New("failed to parse permission: " + s[1]).Base(perr)
 				}
 
 				mode := os.FileMode(perm)
@@ -113,25 +134,24 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 			callback = func(l net.Listener, err error) (net.Listener, error) {
 				if err != nil {
 					locker.Release()
-					return l, err
+					return nil, err
 				}
-				l = &combinedListener{Listener: l, locker: locker}
+				l = &UnixListenerWrapper{UnixListener: l.(*net.UnixListener), locker: locker}
 				if filePerm == nil {
 					return l, nil
 				}
 				err = os.Chmod(address, *filePerm)
 				if err != nil {
 					l.Close()
-					return nil, newError("failed to set permission for " + address).Base(err)
+					return nil, errors.New("failed to set permission for " + address).Base(err)
 				}
 				return l, nil
 			}
 		}
 	}
 
-	l, err = lc.Listen(ctx, network, address)
-	l, err = callback(l, err)
-	if sockopt != nil && sockopt.AcceptProxyProtocol {
+	l, err = callback(lc.Listen(ctx, network, address))
+	if err == nil && sockopt != nil && sockopt.AcceptProxyProtocol {
 		policyFunc := func(upstream net.Addr) (proxyproto.Policy, error) { return proxyproto.REQUIRE, nil }
 		l = &proxyproto.Listener{Listener: l, Policy: policyFunc}
 	}
@@ -152,7 +172,7 @@ func (dl *DefaultListener) ListenPacket(ctx context.Context, addr net.Addr, sock
 // xray:api:beta
 func RegisterListenerController(controller control.Func) error {
 	if controller == nil {
-		return newError("nil listener controller")
+		return errors.New("nil listener controller")
 	}
 
 	effectiveListener.controllers = append(effectiveListener.controllers, controller)

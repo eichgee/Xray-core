@@ -8,7 +8,6 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
 	gotls "crypto/tls"
@@ -16,7 +15,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"reflect"
 	"regexp"
@@ -27,20 +25,14 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 	"github.com/xtls/reality"
+	"github.com/xtls/xray-core/common/crypto"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/transport/internet/tls"
-	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/net/http2"
 )
-
-//go:generate go run github.com/xtls/xray-core/common/errors/errorgen
-
-//go:linkname aesgcmPreferred github.com/refraction-networking/utls.aesgcmPreferred
-func aesgcmPreferred(ciphers []uint16) bool
 
 type Conn struct {
 	*reality.Conn
@@ -112,6 +104,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		ServerName:             config.ServerName,
 		InsecureSkipVerify:     true,
 		SessionTicketsDisabled: true,
+		KeyLogWriter:           KeyLogWriterFromConfig(config),
 	}
 	if utlsConfig.ServerName == "" {
 		utlsConfig.ServerName = dest.Address.String()
@@ -119,7 +112,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 	uConn.ServerName = utlsConfig.ServerName
 	fingerprint := tls.GetFingerprint(config.Fingerprint)
 	if fingerprint == nil {
-		return nil, newError("REALITY: failed to get fingerprint").AtError()
+		return nil, errors.New("REALITY: failed to get fingerprint").AtError()
 	}
 	uConn.UConn = utls.UClient(c, utlsConfig, *fingerprint)
 	{
@@ -134,28 +127,26 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 		copy(hello.SessionId[8:], config.ShortId)
 		if config.Show {
-			newError(fmt.Sprintf("REALITY localAddr: %v\thello.SessionId[:16]: %v\n", localAddr, hello.SessionId[:16])).WriteToLog(session.ExportIDToError(ctx))
+			errors.LogInfo(ctx, fmt.Sprintf("REALITY localAddr: %v\thello.SessionId[:16]: %v\n", localAddr, hello.SessionId[:16]))
 		}
 		publicKey, err := ecdh.X25519().NewPublicKey(config.PublicKey)
 		if err != nil {
 			return nil, errors.New("REALITY: publicKey == nil")
 		}
-		uConn.AuthKey, _ = uConn.HandshakeState.State13.EcdheKey.ECDH(publicKey)
+		if uConn.HandshakeState.State13.KeyShareKeys.Ecdhe == nil {
+			return nil, errors.New("Current fingerprint ", uConn.ClientHelloID.Client, uConn.ClientHelloID.Version, " does not support TLS 1.3, REALITY handshake cannot establish.")
+		}
+		uConn.AuthKey, _ = uConn.HandshakeState.State13.KeyShareKeys.Ecdhe.ECDH(publicKey)
 		if uConn.AuthKey == nil {
 			return nil, errors.New("REALITY: SharedKey == nil")
 		}
 		if _, err := hkdf.New(sha256.New, uConn.AuthKey, hello.Random[:20], []byte("REALITY")).Read(uConn.AuthKey); err != nil {
 			return nil, err
 		}
-		var aead cipher.AEAD
-		if aesgcmPreferred(hello.CipherSuites) {
-			block, _ := aes.NewCipher(uConn.AuthKey)
-			aead, _ = cipher.NewGCM(block)
-		} else {
-			aead, _ = chacha20poly1305.New(uConn.AuthKey)
-		}
+		block, _ := aes.NewCipher(uConn.AuthKey)
+		aead, _ := cipher.NewGCM(block)
 		if config.Show {
-			newError(fmt.Sprintf("REALITY localAddr: %v\tuConn.AuthKey[:16]: %v\tAEAD: %T\n", localAddr, uConn.AuthKey[:16], aead)).WriteToLog(session.ExportIDToError(ctx))
+			errors.LogInfo(ctx, fmt.Sprintf("REALITY localAddr: %v\tuConn.AuthKey[:16]: %v\tAEAD: %T\n", localAddr, uConn.AuthKey[:16], aead))
 		}
 		aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
 		copy(hello.Raw[39:], hello.SessionId)
@@ -164,14 +155,14 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		return nil, err
 	}
 	if config.Show {
-		newError(fmt.Sprintf("REALITY localAddr: %v\tuConn.Verified: %v\n", localAddr, uConn.Verified)).WriteToLog(session.ExportIDToError(ctx))
+		errors.LogInfo(ctx, fmt.Sprintf("REALITY localAddr: %v\tuConn.Verified: %v\n", localAddr, uConn.Verified))
 	}
 	if !uConn.Verified {
 		go func() {
 			client := &http.Client{
 				Transport: &http2.Transport{
 					DialTLSContext: func(ctx context.Context, network, addr string, cfg *gotls.Config) (net.Conn, error) {
-						newError(fmt.Sprintf("REALITY localAddr: %v\tDialTLSContext\n", localAddr)).WriteToLog(session.ExportIDToError(ctx))
+						errors.LogInfo(ctx, fmt.Sprintf("REALITY localAddr: %v\tDialTLSContext\n", localAddr))
 						return uConn, nil
 					},
 				},
@@ -179,12 +170,12 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 			prefix := []byte("https://" + uConn.ServerName)
 			maps.Lock()
 			if maps.maps == nil {
-				maps.maps = make(map[string]map[string]bool)
+				maps.maps = make(map[string]map[string]struct{})
 			}
 			paths := maps.maps[uConn.ServerName]
 			if paths == nil {
-				paths = make(map[string]bool)
-				paths[config.SpiderX] = true
+				paths = make(map[string]struct{})
+				paths[config.SpiderX] = struct{}{}
 				maps.maps[uConn.ServerName] = paths
 			}
 			firstURL := string(prefix) + getPathLocked(paths)
@@ -203,22 +194,26 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 					req, _ = http.NewRequest("GET", string(prefix)+getPathLocked(paths), nil)
 					maps.Unlock()
 				}
+				if req == nil {
+					return
+				}
 				req.Header.Set("User-Agent", fingerprint.Client) // TODO: User-Agent map
 				if first && config.Show {
-					newError(fmt.Sprintf("REALITY localAddr: %v\treq.UserAgent(): %v\n", localAddr, req.UserAgent())).WriteToLog(session.ExportIDToError(ctx))
+					errors.LogInfo(ctx, fmt.Sprintf("REALITY localAddr: %v\treq.UserAgent(): %v\n", localAddr, req.UserAgent()))
 				}
 				times := 1
 				if !first {
-					times = int(randBetween(config.SpiderY[4], config.SpiderY[5]))
+					times = int(crypto.RandBetween(config.SpiderY[4], config.SpiderY[5]))
 				}
 				for j := 0; j < times; j++ {
 					if !first && j == 0 {
 						req.Header.Set("Referer", firstURL)
 					}
-					req.AddCookie(&http.Cookie{Name: "padding", Value: strings.Repeat("0", int(randBetween(config.SpiderY[0], config.SpiderY[1])))})
+					req.AddCookie(&http.Cookie{Name: "padding", Value: strings.Repeat("0", int(crypto.RandBetween(config.SpiderY[0], config.SpiderY[1])))})
 					if resp, err = client.Do(req); err != nil {
 						break
 					}
+					defer resp.Body.Close()
 					req.Header.Set("Referer", req.URL.String())
 					if body, err = io.ReadAll(resp.Body); err != nil {
 						break
@@ -227,30 +222,30 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 					for _, m := range href.FindAllSubmatch(body, -1) {
 						m[1] = bytes.TrimPrefix(m[1], prefix)
 						if !bytes.Contains(m[1], dot) {
-							paths[string(m[1])] = true
+							paths[string(m[1])] = struct{}{}
 						}
 					}
 					req.URL.Path = getPathLocked(paths)
 					if config.Show {
-						newError(fmt.Sprintf("REALITY localAddr: %v\treq.Referer(): %v\n", localAddr, req.Referer())).WriteToLog(session.ExportIDToError(ctx))
-						newError(fmt.Sprintf("REALITY localAddr: %v\tlen(body): %v\n", localAddr, len(body))).WriteToLog(session.ExportIDToError(ctx))
-						newError(fmt.Sprintf("REALITY localAddr: %v\tlen(paths): %v\n", localAddr, len(paths))).WriteToLog(session.ExportIDToError(ctx))
+						errors.LogInfo(ctx, fmt.Sprintf("REALITY localAddr: %v\treq.Referer(): %v\n", localAddr, req.Referer()))
+						errors.LogInfo(ctx, fmt.Sprintf("REALITY localAddr: %v\tlen(body): %v\n", localAddr, len(body)))
+						errors.LogInfo(ctx, fmt.Sprintf("REALITY localAddr: %v\tlen(paths): %v\n", localAddr, len(paths)))
 					}
 					maps.Unlock()
 					if !first {
-						time.Sleep(time.Duration(randBetween(config.SpiderY[6], config.SpiderY[7])) * time.Millisecond) // interval
+						time.Sleep(time.Duration(crypto.RandBetween(config.SpiderY[6], config.SpiderY[7])) * time.Millisecond) // interval
 					}
 				}
 			}
 			get(true)
-			concurrency := int(randBetween(config.SpiderY[2], config.SpiderY[3]))
+			concurrency := int(crypto.RandBetween(config.SpiderY[2], config.SpiderY[3]))
 			for i := 0; i < concurrency; i++ {
 				go get(false)
 			}
 			// Do not close the connection
 		}()
-		time.Sleep(time.Duration(randBetween(config.SpiderY[8], config.SpiderY[9])) * time.Millisecond) // return
-		return nil, errors.New("REALITY: processed invalid connection")
+		time.Sleep(time.Duration(crypto.RandBetween(config.SpiderY[8], config.SpiderY[9])) * time.Millisecond) // return
+		return nil, errors.New("REALITY: processed invalid connection").AtWarning()
 	}
 	return uConn, nil
 }
@@ -262,11 +257,11 @@ var (
 
 var maps struct {
 	sync.Mutex
-	maps map[string]map[string]bool
+	maps map[string]map[string]struct{}
 }
 
-func getPathLocked(paths map[string]bool) string {
-	stopAt := int(randBetween(0, int64(len(paths)-1)))
+func getPathLocked(paths map[string]struct{}) string {
+	stopAt := int(crypto.RandBetween(0, int64(len(paths)-1)))
 	i := 0
 	for s := range paths {
 		if i == stopAt {
@@ -275,12 +270,4 @@ func getPathLocked(paths map[string]bool) string {
 		i++
 	}
 	return "/"
-}
-
-func randBetween(left int64, right int64) int64 {
-	if left == right {
-		return left
-	}
-	bigInt, _ := rand.Int(rand.Reader, big.NewInt(right-left))
-	return left + bigInt.Int64()
 }
