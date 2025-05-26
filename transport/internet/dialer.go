@@ -28,7 +28,7 @@ type Dialer interface {
 	Address() net.Address
 
 	// DestIpAddress returns the ip of proxy server. It is useful in case of Android client, which prepare an IP before proxy connection is established
-	DestIpAddress() net.IP
+	DestIpAddress(domain string) net.IP
 }
 
 // dialFunc is an interface to dial network connection to a specific destination.
@@ -76,8 +76,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *MemoryStrea
 }
 
 // DestIpAddress returns the ip of proxy server. It is useful in case of Android client, which prepare an IP before proxy connection is established
-func DestIpAddress() net.IP {
-	return effectiveSystemDialer.DestIpAddress()
+func DestIpAddress(domain string) net.IP {
+	return effectiveSystemDialer.DestIpAddress(domain)
 }
 
 var (

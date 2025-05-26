@@ -205,6 +205,7 @@ func (c *udpConn) Write(buf []byte) (int, error) {
 func (c *udpConn) Close() error {
 	common.Must(c.done.Close())
 	common.Must(common.Close(c.writer))
+	common.Must(common.Close(c.reader))
 	return nil
 }
 
@@ -421,6 +422,10 @@ func (w *udpWorker) Close() error {
 
 	if err := common.Close(w.proxy); err != nil {
 		errs = append(errs, err)
+	}
+
+	for _, v := range w.activeConn {
+		errs = append(errs, v.Close())
 	}
 
 	if len(errs) > 0 {

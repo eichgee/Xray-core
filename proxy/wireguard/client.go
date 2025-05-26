@@ -293,7 +293,7 @@ func (h *Handler) createIPCRequest() string {
 		}
 		addr := net.ParseAddress(address)
 		if addr.Family().IsDomain() {
-			dialerIp := h.bind.dialer.DestIpAddress()
+			dialerIp := h.bind.dialer.DestIpAddress(addr.Domain())
 			if dialerIp != nil {
 				addr = net.ParseAddress(dialerIp.String())
 				errors.LogInfo(h.bind.ctx, "createIPCRequest use dialer dest ip: ", addr)

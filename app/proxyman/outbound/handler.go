@@ -234,8 +234,8 @@ func (h *Handler) Address() net.Address {
 	return h.senderSettings.Via.AsAddress()
 }
 
-func (h *Handler) DestIpAddress() net.IP {
-	return internet.DestIpAddress()
+func (h *Handler) DestIpAddress(domain string) net.IP {
+	return internet.DestIpAddress(domain)
 }
 
 // Dial implements internet.Dialer.
