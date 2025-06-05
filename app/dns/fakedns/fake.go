@@ -24,13 +24,27 @@ type Holder struct {
 }
 
 func (fkdns *Holder) IsIPInIPPool(ip net.Address) bool {
+	defer func() {
+		if r := recover(); r != nil {
+			errors.LogDebug(context.Background(), "panic:", r)
+		}
+	}()
+
 	if ip.Family().IsDomain() {
 		return false
 	}
-	return fkdns.ipRange.Contains(ip.IP())
+	b := fkdns.ipRange.Contains(ip.IP())
+
+	return b
 }
 
 func (fkdns *Holder) GetFakeIPForDomain3(domain string, ipv4, ipv6 bool) []net.Address {
+	defer func() {
+		if r := recover(); r != nil {
+			errors.LogDebug(context.Background(), "panic:", r)
+		}
+	}()
+
 	isIPv6 := fkdns.ipRange.IP.To4() == nil
 	if (isIPv6 && ipv6) || (!isIPv6 && ipv4) {
 		return fkdns.GetFakeIPForDomain(domain)
@@ -132,6 +146,12 @@ func (fkdns *Holder) GetFakeIPForDomain(domain string) []net.Address {
 
 // GetDomainFromFakeDNS checks if an IP is a fake IP and have corresponding domain name
 func (fkdns *Holder) GetDomainFromFakeDNS(ip net.Address) string {
+	defer func() {
+		if r := recover(); r != nil {
+			errors.LogDebug(context.Background(), "panic:", r)
+		}
+	}()
+
 	if !ip.Family().IsIP() || !fkdns.ipRange.Contains(ip.IP()) {
 		return ""
 	}
