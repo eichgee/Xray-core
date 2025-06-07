@@ -17,19 +17,13 @@ var effectiveSystemDialer SystemDialer = &DefaultSystemDialer{}
 
 var NIL_RESOLVE_IP string = "127.4.0.4"
 
-// type HostResolver = func(context.Context, string) (net.IP, error)
-type HostResolver interface {
-	NextIP(host string)
-	Resolve(ctx context.Context, host string) (net.IP, error)
-}
-
 type SystemDialer interface {
 	Dial(ctx context.Context, source net.Address, destination net.Destination, sockopt *SocketConfig) (net.Conn, error)
 	DestIpAddress(domain string) net.IP
 }
 
 type DefaultSystemDialer struct {
-	resolver    HostResolver
+	resolver    *net.Resolver
 	controllers []control.Func
 	dns         dns.Client
 	obm         outbound.Manager
@@ -58,27 +52,6 @@ func hasBindAddr(sockopt *SocketConfig) bool {
 }
 
 func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest net.Destination, sockopt *SocketConfig) (net.Conn, error) {
-	var domain string
-
-	if d.resolver != nil {
-		if !dest.Address.Family().IsIP() {
-			domain = dest.Address.Domain()
-			ip, err := d.resolver.Resolve(ctx, domain)
-			if err != nil {
-				return nil, err
-			}
-			dest.Address = net.IPAddress(ip)
-		}
-
-		if dest.Address.String() == NIL_RESOLVE_IP {
-			return nil, errors.New("Unable to resolve hostname")
-		}
-	}
-
-	return d.innerDial(ctx, src, dest, sockopt)
-}
-
-func (d *DefaultSystemDialer) innerDial(ctx context.Context, src net.Address, dest net.Destination, sockopt *SocketConfig) (net.Conn, error) {
 	errors.LogDebug(ctx, "dialing to "+dest.String())
 
 	if dest.Network == net.Network_UDP && !hasBindAddr(sockopt) {
@@ -125,6 +98,7 @@ func (d *DefaultSystemDialer) innerDial(ctx context.Context, src net.Address, de
 		Timeout:   time.Second * 16,
 		LocalAddr: resolveSrcAddr(dest.Network, src),
 		KeepAlive: goStdKeepAlive,
+		Resolver:  d.resolver,
 	}
 
 	if sockopt != nil || len(d.controllers) > 0 {
@@ -157,16 +131,13 @@ func (d *DefaultSystemDialer) innerDial(ctx context.Context, src net.Address, de
 
 func (d *DefaultSystemDialer) DestIpAddress(domain string) net.IP {
 	if d.resolver != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		ip, err := d.resolver.Resolve(ctx, domain)
-		if err == nil {
-			return ip
+		ips, err := d.resolver.LookupIP(context.Background(), "ip", domain)
+		if err == nil && len(ips) > 0 {
+			return ips[0]
 		}
 	}
 
-	return resolveHost(domain)
+	return nil
 }
 
 type PacketConnWrapper struct {
@@ -282,8 +253,8 @@ func RegisterDialerController(ctl control.Func) error {
 	return nil
 }
 
-func RegisterHostResolver(ctl HostResolver) error {
-	if ctl == nil {
+func RegisterHostResolver(resolver *net.Resolver) error {
+	if resolver == nil {
 		return errors.New("nil host resolver")
 	}
 
@@ -292,7 +263,7 @@ func RegisterHostResolver(ctl HostResolver) error {
 		return errors.New("RegisterHostResolver not supported in custom dialer")
 	}
 
-	dialer.resolver = ctl
+	dialer.resolver = resolver
 	return nil
 }
 
