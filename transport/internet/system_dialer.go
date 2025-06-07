@@ -15,18 +15,13 @@ import (
 
 var effectiveSystemDialer SystemDialer = &DefaultSystemDialer{}
 
-// type HostResolver = func(context.Context, string) (net.IP, error)
-type HostResolver interface {
-	InterfaceIP() string
-}
-
 type SystemDialer interface {
 	Dial(ctx context.Context, source net.Address, destination net.Destination, sockopt *SocketConfig) (net.Conn, error)
 	DestIpAddress() net.IP
 }
 
 type DefaultSystemDialer struct {
-	resolver    HostResolver
+	resolver    *net.Resolver
 	controllers []control.Func
 	dns         dns.Client
 	obm         outbound.Manager
@@ -101,21 +96,7 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
 		Timeout:   time.Second * 16,
 		LocalAddr: resolveSrcAddr(dest.Network, src),
 		KeepAlive: goStdKeepAlive,
-	}
-
-	if d.resolver != nil {
-		localIP := d.resolver.InterfaceIP()
-		if localIP != "" {
-			dialer.Resolver = &net.Resolver{
-				Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-					dialerResolver := &net.Dialer{
-						LocalAddr: &net.UDPAddr{IP: net.ParseIP(localIP)},
-					}
-
-					return dialerResolver.DialContext(ctx, network, address)
-				},
-			}
-		}
+		Resolver:  d.resolver,
 	}
 
 	if sockopt != nil || len(d.controllers) > 0 {
@@ -248,8 +229,8 @@ func RegisterDialerController(ctl control.Func) error {
 	return nil
 }
 
-func RegisterHostResolver(ctl HostResolver) error {
-	if ctl == nil {
+func RegisterHostResolver(resolver *net.Resolver) error {
+	if resolver == nil {
 		return errors.New("nil host resolver")
 	}
 
@@ -258,7 +239,7 @@ func RegisterHostResolver(ctl HostResolver) error {
 		return errors.New("RegisterHostResolver not supported in custom dialer")
 	}
 
-	dialer.resolver = ctl
+	dialer.resolver = resolver
 	return nil
 }
 
