@@ -34,6 +34,7 @@ type netBind struct {
 
 	workers   int
 	readQueue chan *netReadInfo
+	closeOnce sync.Once
 }
 
 // SetMark implements conn.Bind
@@ -115,7 +116,9 @@ func (bind *netBind) Open(uport uint16) ([]conn.ReceiveFunc, uint16, error) {
 // Close implements conn.Bind
 func (bind *netBind) Close() error {
 	if bind.readQueue != nil {
-		close(bind.readQueue)
+		bind.closeOnce.Do(func() {
+			close(bind.readQueue)
+		})
 	}
 	return nil
 }
