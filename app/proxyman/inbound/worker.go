@@ -424,8 +424,12 @@ func (w *udpWorker) Close() error {
 		errs = append(errs, err)
 	}
 
-	for _, v := range w.activeConn {
-		errs = append(errs, v.Close())
+	for addr, conn := range w.activeConn {
+		if !conn.inactive {
+			conn.setInactive()
+			delete(w.activeConn, addr)
+			conn.Close()
+		}
 	}
 
 	if len(errs) > 0 {
