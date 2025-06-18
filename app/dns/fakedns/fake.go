@@ -30,10 +30,21 @@ func (fkdns *Holder) IsIPInIPPool(ip net.Address) bool {
 		}
 	}()
 
+	if ip == nil {
+		return false
+	}
+
 	if ip.Family().IsDomain() {
 		return false
 	}
-	b := fkdns.ipRange.Contains(ip.IP())
+
+	realIP := ip.IP()
+
+	if realIP == nil {
+		return false
+	}
+
+	b := fkdns.ipRange.Contains(realIP)
 	return b
 }
 
@@ -151,7 +162,17 @@ func (fkdns *Holder) GetDomainFromFakeDNS(ip net.Address) string {
 		}
 	}()
 
-	if !ip.Family().IsIP() || !fkdns.ipRange.Contains(ip.IP()) {
+	if ip == nil {
+		return ""
+	}
+
+	realIp := ip.IP()
+
+	if realIp == nil {
+		return ""
+	}
+
+	if !ip.Family().IsIP() || !fkdns.ipRange.Contains(realIp) {
 		return ""
 	}
 	if k, ok := fkdns.domainToIP.GetKeyFromValue(ip); ok {

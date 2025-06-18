@@ -2,7 +2,9 @@ package internet
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
+	"sync"
 	"syscall"
 	"time"
 
@@ -13,9 +15,7 @@ import (
 	"github.com/xtls/xray-core/features/outbound"
 )
 
-var effectiveSystemDialer SystemDialer = &DefaultSystemDialer{}
-
-var NIL_RESOLVE_IP string = "127.4.0.4"
+var effectiveSystemDialer SystemDialer = newDefaultSystemDialer()
 
 type SystemDialer interface {
 	Dial(ctx context.Context, source net.Address, destination net.Destination, sockopt *SocketConfig) (net.Conn, error)
@@ -23,10 +23,70 @@ type SystemDialer interface {
 }
 
 type DefaultSystemDialer struct {
+	dnsServers  sync.Map
 	resolver    *net.Resolver
 	controllers []control.Func
 	dns         dns.Client
 	obm         outbound.Manager
+}
+
+func newDefaultSystemDialer() *DefaultSystemDialer {
+	dialer := &DefaultSystemDialer{}
+	dialer.dnsServers.Store("primary", "8.8.8.8")
+	dialer.dnsServers.Store("secondary", "8.8.4.4")
+
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial:     dialer.resolverDial,
+	}
+	dialer.resolver = resolver
+
+	return dialer
+}
+
+func (p *DefaultSystemDialer) resolverDial(ctx context.Context, network, address string) (net.Conn, error) {
+	d := &net.Dialer{}
+	d.Control = func(network, address string, c syscall.RawConn) error {
+		for _, ctl := range p.controllers {
+			ctl(network, address, c)
+		}
+
+		return nil
+	}
+
+	isLocal := isLocalIP(address)
+	if !isLocal {
+		return d.DialContext(ctx, network, address)
+	}
+
+	if server, ok := p.dnsServers.Load("primary"); ok {
+		address = fmt.Sprintf("%s:53", server)
+
+		conn, err := d.DialContext(ctx, network, address)
+		if err == nil {
+			return conn, nil
+		}
+
+		if server, ok := p.dnsServers.Load("secondary"); ok {
+			address = fmt.Sprintf("%s:53", server)
+			return d.DialContext(ctx, network, address)
+		}
+	}
+
+	return nil, fmt.Errorf("unable to dial dns server")
+}
+
+func isLocalIP(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 func resolveSrcAddr(network net.Network, src net.Address) net.Addr {
@@ -205,22 +265,7 @@ func (v *SimpleSystemDialer) Dial(ctx context.Context, src net.Address, dest net
 }
 
 func (d *SimpleSystemDialer) DestIpAddress(domain string) net.IP {
-	return resolveHost(domain)
-}
-
-func resolveHost(domain string) net.IP {
-	var ret = net.ParseIP(NIL_RESOLVE_IP)
-
-	ips, err := net.LookupIP(domain)
-	if err != nil {
-		return ret
-	}
-
-	if len(ips) == 0 {
-		return ret
-	}
-
-	return ips[0]
+	return nil
 }
 
 // UseAlternativeSystemDialer replaces the current system dialer with a given one.
@@ -250,20 +295,6 @@ func RegisterDialerController(ctl control.Func) error {
 	}
 
 	dialer.controllers = append(dialer.controllers, ctl)
-	return nil
-}
-
-func RegisterHostResolver(resolver *net.Resolver) error {
-	if resolver == nil {
-		return errors.New("nil host resolver")
-	}
-
-	dialer, ok := effectiveSystemDialer.(*DefaultSystemDialer)
-	if !ok {
-		return errors.New("RegisterHostResolver not supported in custom dialer")
-	}
-
-	dialer.resolver = resolver
 	return nil
 }
 
