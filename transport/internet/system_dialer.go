@@ -2,9 +2,10 @@ package internet
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
-	"sync"
+	gonet "net"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,70 +24,67 @@ type SystemDialer interface {
 }
 
 type DefaultSystemDialer struct {
-	dnsServers  sync.Map
-	resolver    *net.Resolver
 	controllers []control.Func
 	dns         dns.Client
 	obm         outbound.Manager
+
+	servers  atomic.Value
+	dialer   *net.Dialer
+	resolver *net.Resolver
 }
 
 func newDefaultSystemDialer() *DefaultSystemDialer {
 	dialer := &DefaultSystemDialer{}
-	dialer.dnsServers.Store("primary", "8.8.8.8")
-	dialer.dnsServers.Store("secondary", "8.8.4.4")
-
-	resolver := &net.Resolver{
+	dialer.resolver = &net.Resolver{
 		PreferGo: true,
 		Dial:     dialer.resolverDial,
 	}
-	dialer.resolver = resolver
 
+	dialer.dialer = &net.Dialer{
+		Control: dialer.resolverControl,
+	}
 	return dialer
 }
 
-func (p *DefaultSystemDialer) resolverDial(ctx context.Context, network, address string) (net.Conn, error) {
-	d := &net.Dialer{}
-	d.Control = func(network, address string, c syscall.RawConn) error {
+func (p *DefaultSystemDialer) resolverControl(network, address string, c syscall.RawConn) error {
+	if len(p.controllers) > 0 {
 		for _, ctl := range p.controllers {
 			ctl(network, address, c)
 		}
-
-		return nil
 	}
 
-	isLocal := isLocalIP(address)
-	if !isLocal {
-		return d.DialContext(ctx, network, address)
-	}
-
-	if server, ok := p.dnsServers.Load("primary"); ok {
-		address = fmt.Sprintf("%s:53", server)
-
-		conn, err := d.DialContext(ctx, network, address)
-		if err == nil {
-			return conn, nil
-		}
-
-		if server, ok := p.dnsServers.Load("secondary"); ok {
-			address = fmt.Sprintf("%s:53", server)
-			return d.DialContext(ctx, network, address)
-		}
-	}
-
-	return nil, fmt.Errorf("unable to dial dns server")
+	return nil
 }
 
-func isLocalIP(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
+func (p *DefaultSystemDialer) resolverDial(ctx context.Context, network, address string) (net.Conn, error) {
+	var (
+		conn net.Conn
+		err  error
+	)
+
+	if val, ok := p.servers.Load().([]string); ok {
+		for _, addr := range val {
+			addr = strings.TrimSpace(addr)
+			if addr == "" {
+				continue
+			}
+			host := gonet.JoinHostPort(addr, "53")
+			conn, err = p.dialer.DialContext(ctx, network, host)
+			if err == nil {
+				return conn, nil
+			}
+
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
 	}
 
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
+	if err != nil {
+		return nil, err
 	}
-	return ip.IsLoopback()
+
+	return nil, errors.New("unable to dial dns")
 }
 
 func resolveSrcAddr(network net.Network, src net.Address) net.Addr {
@@ -158,7 +156,10 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
 		Timeout:   time.Second * 16,
 		LocalAddr: resolveSrcAddr(dest.Network, src),
 		KeepAlive: goStdKeepAlive,
-		Resolver:  d.resolver,
+	}
+
+	if len(d.controllers) > 0 {
+		dialer.Resolver = d.resolver
 	}
 
 	if sockopt != nil || len(d.controllers) > 0 {
@@ -296,6 +297,17 @@ func RegisterDialerController(ctl control.Func) error {
 
 	dialer.controllers = append(dialer.controllers, ctl)
 	return nil
+}
+
+func SetDnsAddresses(addresses string) {
+	dialer, ok := effectiveSystemDialer.(*DefaultSystemDialer)
+	if !ok {
+		return
+	}
+
+	list := strings.Split(addresses, ",")
+	list = append(list, "1.1.1.1", "1.0.0.1")
+	dialer.servers.Store(list)
 }
 
 type FakePacketConn struct {
