@@ -43,6 +43,9 @@ func newDefaultSystemDialer() *DefaultSystemDialer {
 	dialer.dialer = &net.Dialer{
 		Control: dialer.resolverControl,
 	}
+
+	list := []string{"1.1.1.1", "1.0.0.1"}
+	dialer.servers.Store(list)
 	return dialer
 }
 
